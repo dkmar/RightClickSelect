@@ -1,18 +1,21 @@
 import Cocoa
 import ApplicationServices
 
-// Global flag to track if we are in our custom right-drag text-selection mode
-var isRightDragSelecting = false
-
-// C
+// C keycode
 let kVK_ANSI_C: CGKeyCode = 0x08
 
-/// Helper: Simulate a left-mouse event at the given location.
-func simulateMouseEvent(type: CGEventType, location: CGPoint) {
-    if let event = CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: location, mouseButton: .left) {
-        // Post the event to the HID event tap so that it appears as if it was a physical event.
-        event.post(tap: .cghidEventTap)
-    }
+// Global flag to track if we are in our custom right-drag text-selection mode
+var isRightDragSelecting = false
+// Global to store the initial location of the right-mouse down event
+var initialClickLocation: CGPoint = .zero
+// Previous event type to decide if a drag is occurring (if consecutive drag events)
+var previousMouseEventType: CGEventType = .rightMouseUp
+
+/// Helper: Simulate a mouse event
+func simulateMouseEvent(src: CGEventSource?, proxy: CGEventTapProxy, type: CGEventType, at location: CGPoint) {
+    let event = CGEvent(mouseEventSource: src, mouseType: type, mouseCursorPosition: location, mouseButton: .left)
+    // Post event
+    event?.tapPostEvent(proxy)
 }
 
 /// Helper: Simulate a Cmd+C keystroke to copy the current selection.
@@ -32,47 +35,68 @@ func simulateCmdC() {
     }
 }
 
-/// Check if the current cursor is an iBeam.
-/// (Note: macOS does not provide a public API to directly determine the cursor type.
-/// This is a placeholder where you might use a heuristic or private API if available.)
-func isCursorIBeam() -> Bool {
-    // For demonstration purposes, we assume it is always an iBeam.
-    // In a real implementation, you might check the current UI element via Accessibility APIs.
-//    guard let cursorID = NSCursor.currentSystem!.image.tiffRepresentation?.count else { return false }
-//    print(cursorID)
-    return true
-}
-
 /// The CGEventTap callback which intercepts right mouse events.
 func eventTapCallback(proxy: CGEventTapProxy, type: CGEventType, event: CGEvent, refcon: UnsafeMutableRawPointer?) -> Unmanaged<CGEvent>? {
     
-    let location = event.location
+    // skip if modifiers are held
+    if !event.flags.isEmpty {
+        return Unmanaged.passUnretained(event)
+    }
     
     switch type {
     case .rightMouseDown:
-        // Only trigger our special behavior if the pointer appears to be over text.
-        // Ok lets also disqualify if modifiers
-        if event.flags.isEmpty && isCursorIBeam() {
-            // Begin our custom selection by synthesizing a left-mouse down event.
-            simulateMouseEvent(type: .leftMouseDown, location: location)
-            isRightDragSelecting = true
-            // Swallow the original right-mouse down event.
-            return nil
-        }
+        // Store the initial location for potential drag
+        initialClickLocation = event.location
+        // we will decide if it's a normal click on release. swallow for now
+        return nil
     case .rightMouseDragged:
         if isRightDragSelecting {
             // As the mouse moves, synthesize left-mouse dragged events.
-            simulateMouseEvent(type: .leftMouseDragged, location: location)
+            simulateMouseEvent(src: CGEventSource(event: event), proxy: proxy,
+                               type: .leftMouseDragged, at: event.location)
             return nil
+        }
+        // Start selection if drag (rather than just a click w immediate release)
+        else if previousMouseEventType == .rightMouseDragged {
+            // Begin custom selection by simulating a left-mouse down at the start location.
+            simulateMouseEvent(src: CGEventSource(event: event), proxy: proxy,
+                               type: .leftMouseDown, at: initialClickLocation)
+            isRightDragSelecting = true
+            // Also simulate the first drag event.
+            simulateMouseEvent(src: CGEventSource(event: event), proxy: proxy,
+                               type: .leftMouseDragged, at: event.location)
+            return nil
+        } else {
+            // If we aren't dragging yet, update prev and pass the event through.
+            previousMouseEventType = .rightMouseDragged
+            return Unmanaged.passUnretained(event)
         }
     case .rightMouseUp:
         if isRightDragSelecting {
             // End the selection with a left-mouse up event.
-            simulateMouseEvent(type: .leftMouseUp, location: location)
+            simulateMouseEvent(src: CGEventSource(event: event), proxy: proxy,
+                               type: .leftMouseUp, at: event.location)
             // Now simulate Cmd+C to copy the selected text.
             simulateCmdC()
+            // Reset globals
             isRightDragSelecting = false
+            previousMouseEventType = .rightMouseUp
+            // Deselect with another click
+            // (lets give the cmd-c key press a second to process through)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                simulateMouseEvent(src: CGEventSource(event: event), proxy: proxy,
+                                   type: .leftMouseDown, at: event.location)
+                simulateMouseEvent(src: CGEventSource(event: event), proxy: proxy,
+                                   type: .leftMouseUp, at: event.location)
+            }
             return nil
+        } else {
+            // No drag was detected; this is a normal right-click.
+            // Send down
+            simulateMouseEvent(src: CGEventSource(event: event), proxy: proxy,
+                               type: .rightMouseDown, at: event.location)
+            // Send up
+            return Unmanaged.passUnretained(event)
         }
     default:
         break
