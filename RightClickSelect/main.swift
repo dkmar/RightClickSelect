@@ -5,11 +5,16 @@ import ApplicationServices
 let kVK_ANSI_C: CGKeyCode = 0x08
 
 // Global flag to track if we are in our custom right-drag text-selection mode
-var isRightDragSelecting = false
+// true (selecting), false (we want hold), nil (dont know yet)
+var isRightDragSelecting: Bool? = nil
 // Global to store the initial location of the right-mouse down event
 var initialClickLocation: CGPoint = .zero
-// Previous event type to decide if a drag is occurring (if consecutive drag events)
-var previousMouseEventType: CGEventType = .rightMouseUp
+var initialClickTime: CGEventTimestamp = 0
+// Thresholds to decide if a drag is occurring (if drag has continued for 100ms?)
+// (literally no idea what unit this is. CGEventTimestamp doesnt look like nanoseconds to me. ~100ms)
+let dragTimeThreshold: CGEventTimestamp = 8_000_000
+let dragDistThreshold: Double = 12.0
+var previousMouseEvent: CGEventType = .rightMouseUp
 
 /// Helper: Simulate a mouse event
 func simulateMouseEvent(src: CGEventSource?, proxy: CGEventTapProxy, type: CGEventType, at location: CGPoint) {
@@ -38,60 +43,80 @@ func simulateCmdC() {
 /// The CGEventTap callback which intercepts right mouse events.
 func eventTapCallback(proxy: CGEventTapProxy, type: CGEventType, event: CGEvent, refcon: UnsafeMutableRawPointer?) -> Unmanaged<CGEvent>? {
     
-    // skip if modifiers are held
+    // skip if modifiers are held or other buttons are active
     if !event.flags.isEmpty {
         return Unmanaged.passUnretained(event)
     }
     
     switch type {
     case .rightMouseDown:
-        // Store the initial location for potential drag
+        // Store the initial location and time for potential drag
         initialClickLocation = event.location
-        // we will decide if it's a normal click on release. swallow for now
+        initialClickTime = event.timestamp
+        previousMouseEvent = .rightMouseDown
+        // we will decide if it's a normal click later. swallow for now.
         return nil
     case .rightMouseDragged:
-        if isRightDragSelecting {
+        if isRightDragSelecting == true {
             // As the mouse moves, synthesize left-mouse dragged events.
             simulateMouseEvent(src: CGEventSource(event: event), proxy: proxy,
                                type: .leftMouseDragged, at: event.location)
             return nil
         }
+        
         // Start selection if drag (rather than just a click w immediate release)
-        else if previousMouseEventType == .rightMouseDragged {
-            // Begin custom selection by simulating a left-mouse down at the start location.
-            simulateMouseEvent(src: CGEventSource(event: event), proxy: proxy,
-                               type: .leftMouseDown, at: initialClickLocation)
-            isRightDragSelecting = true
-            // Also simulate the first drag event.
-            simulateMouseEvent(src: CGEventSource(event: event), proxy: proxy,
-                               type: .leftMouseDragged, at: event.location)
+        else if isRightDragSelecting == nil && event.timestamp - initialClickTime > dragTimeThreshold {
+            if abs(event.location.x - initialClickLocation.x) > dragDistThreshold {
+                previousMouseEvent = .rightMouseDragged
+                isRightDragSelecting = true
+                // Begin custom selection by simulating a left-mouse down at the start location.
+                simulateMouseEvent(src: CGEventSource(event: event), proxy: proxy,
+                                   type: .leftMouseDown, at: initialClickLocation)
+                
+                // Also simulate the first drag event.
+                simulateMouseEvent(src: CGEventSource(event: event), proxy: proxy,
+                                   type: .leftMouseDragged, at: event.location)
+                
+            } else {
+                // Not dragging. Send hold.
+                isRightDragSelecting = false
+                simulateMouseEvent(src: CGEventSource(event: event), proxy: proxy,
+                                   type: .rightMouseDown, at: event.location)
+            }
             return nil
         } else {
-            // If we aren't dragging yet, update prev and pass the event through.
-            previousMouseEventType = .rightMouseDragged
-            return Unmanaged.passUnretained(event)
+            // If we aren't dragging yet, dont pass a drag event.
+            return nil
         }
     case .rightMouseUp:
-        if isRightDragSelecting {
+        if isRightDragSelecting == true {
             // End the selection with a left-mouse up event.
             simulateMouseEvent(src: CGEventSource(event: event), proxy: proxy,
                                type: .leftMouseUp, at: event.location)
             // Now simulate Cmd+C to copy the selected text.
             simulateCmdC()
             // Reset globals
-            isRightDragSelecting = false
-            previousMouseEventType = .rightMouseUp
+            previousMouseEvent = .rightMouseUp
+            isRightDragSelecting = nil
             // Deselect with another click
             // (lets give the cmd-c key press a second to process through)
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                simulateMouseEvent(src: CGEventSource(event: event), proxy: proxy,
-                                   type: .leftMouseDown, at: event.location)
-                simulateMouseEvent(src: CGEventSource(event: event), proxy: proxy,
-                                   type: .leftMouseUp, at: event.location)
-            }
+//            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+//                simulateMouseEvent(src: CGEventSource(event: event), proxy: proxy,
+//                                   type: .leftMouseDown, at: event.location)
+//                simulateMouseEvent(src: CGEventSource(event: event), proxy: proxy,
+//                                   type: .leftMouseUp, at: event.location)
+//            }
             return nil
+        } else if isRightDragSelecting == false {
+            // Holding
+            // Reset
+            previousMouseEvent = .rightMouseUp
+            isRightDragSelecting = nil
+            // Send up
+            return Unmanaged.passUnretained(event)
         } else {
             // No drag was detected; this is a normal right-click.
+            previousMouseEvent = .rightMouseUp
             // Send down
             simulateMouseEvent(src: CGEventSource(event: event), proxy: proxy,
                                type: .rightMouseDown, at: event.location)
