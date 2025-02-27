@@ -3,12 +3,14 @@ import ApplicationServices
 
 // C keycode
 let kVK_ANSI_C: CGKeyCode = 0x08
+// Create a static event source for our Cmd-C events
+let kbEventSource: CGEventSource = CGEventSource(stateID: .combinedSessionState)!
 
 // Define enum to represent drag state
 enum DragState {
     case Selection  // Actively selecting text
     case Hold       // Normal right-click hold
-    case TBD        // Not yet determined 
+    case TBD        // Not yet determined
 }
 
 // Global flag to track if we are in our custom right-drag text-selection mode
@@ -27,21 +29,23 @@ let dragDistThreshold: Double = 20.0
 
 /// Helper: Simulate a mouse event
 func simulateMouseEvent(src: CGEventSource?, proxy: CGEventTapProxy, type: CGEventType, at location: CGPoint) {
-    let event = CGEvent(mouseEventSource: src, mouseType: type, mouseCursorPosition: location, mouseButton: .left)
-    // Post event
-    event?.tapPostEvent(proxy)
+    // note: the mouseButton parameter is ignored in our cases cause we never create new otherMouse events.
+    // https://developer.apple.com/documentation/coregraphics/cgevent/1454356-init
+    if let event = CGEvent(mouseEventSource: src, mouseType: type, mouseCursorPosition: location, mouseButton: .left) {
+        // Post event
+        event.tapPostEvent(proxy)
+    }
 }
 
 /// Helper: Simulate a Cmd+C keystroke to copy the current selection.
 func simulateCmdC() {
-    guard let src = CGEventSource(stateID: .combinedSessionState) else { return }
     // Create a key down event with the Command flag.
-    if let keyDown = CGEvent(keyboardEventSource: src, virtualKey: kVK_ANSI_C, keyDown: true) {
+    if let keyDown = CGEvent(keyboardEventSource: kbEventSource, virtualKey: kVK_ANSI_C, keyDown: true) {
         keyDown.flags = [.maskCommand]
         keyDown.post(tap: .cghidEventTap)
     }
     // Create the corresponding key up event.
-    if let keyUp = CGEvent(keyboardEventSource: src, virtualKey: kVK_ANSI_C, keyDown: false) {
+    if let keyUp = CGEvent(keyboardEventSource: kbEventSource, virtualKey: kVK_ANSI_C, keyDown: false) {
         keyUp.flags = [.maskCommand]
         keyUp.post(tap: .cghidEventTap)
     }
@@ -56,12 +60,12 @@ func trimClipboard() {
 
 /// The CGEventTap callback which intercepts right mouse events.
 func eventTapCallback(proxy: CGEventTapProxy, type: CGEventType, event: CGEvent, refcon: UnsafeMutableRawPointer?) -> Unmanaged<CGEvent>? {
-    
+
     // skip if modifiers are held
     guard event.flags.isEmpty else {
         return Unmanaged.passUnretained(event)
     }
-    
+
     // activate?
     if type == .rightMouseDown {
         // Enter additional processing state.
@@ -72,12 +76,12 @@ func eventTapCallback(proxy: CGEventTapProxy, type: CGEventType, event: CGEvent,
         // we will decide if it's a normal click later. swallow for now.
         return nil
     }
-    
+
     // skip if inactive
     guard active else {
         return Unmanaged.passUnretained(event)
     }
-    
+
     // handle active cases
     switch type {
     case .rightMouseDragged:
@@ -178,7 +182,7 @@ func main() {
         .scrollWheel
     ]
     let eventMask = events.map {1 << $0.rawValue}.reduce(0, |)
-    
+
     guard let eventTap = CGEvent.tapCreate(tap: .cghidEventTap,
                                            place: .headInsertEventTap,
                                            options: .defaultTap,
@@ -189,12 +193,12 @@ func main() {
         print("Failed to create event tap. Make sure the app has accessibility permissions.")
         exit(1)
     }
-    
+
     // Create a run loop source from the event tap.
     let runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, eventTap, 0)
     CFRunLoopAddSource(CFRunLoopGetCurrent(), runLoopSource, .commonModes)
     CGEvent.tapEnable(tap: eventTap, enable: true)
-    
+
     // Run the loop forever.
     CFRunLoopRun()
 }
