@@ -28,11 +28,12 @@ let dragDistThreshold: Double = 20.0
 
 
 /// Helper: Simulate a mouse event
-func simulateMouseEvent(src: CGEventSource?, proxy: CGEventTapProxy, type: CGEventType, at location: CGPoint) {
+func simulateMouseEvent(src: CGEventSource?, proxy: CGEventTapProxy, type: CGEventType, at location: CGPoint, with flags: CGEventFlags) {
     // note: the mouseButton parameter is ignored in our cases cause we never create new otherMouse events.
     // https://developer.apple.com/documentation/coregraphics/cgevent/1454356-init
     if let event = CGEvent(mouseEventSource: src, mouseType: type, mouseCursorPosition: location, mouseButton: .left) {
         // Post event
+        event.flags = flags
         event.tapPostEvent(proxy)
     }
 }
@@ -51,18 +52,27 @@ func simulateCmdC() {
     }
 }
 
-func trimClipboard() {
-    guard let clipboardString = NSPasteboard.general.string(forType: .string) else { return }
-    let trimmedString = clipboardString.trimmingCharacters(in: .whitespacesAndNewlines)
-    NSPasteboard.general.clearContents()
-    NSPasteboard.general.setString(trimmedString, forType: .string)
+/// Copy selection, with option to append to existing content
+func copySelection(appendToClipboard: Bool) {
+    if appendToClipboard {
+        // Append to existing clipboard content with a newline
+        guard let currentString = NSPasteboard.general.string(forType: .string) else { return }
+        simulateCmdC()
+        guard let newString = NSPasteboard.general.string(forType: .string)?.trimmingCharacters(in: .whitespacesAndNewlines) else { return }
+        NSPasteboard.general.setString(currentString + "\n" + newString, forType: .string)
+    } else {
+        // Just use the trimmed content
+        simulateCmdC()
+        guard let newString = NSPasteboard.general.string(forType: .string)?.trimmingCharacters(in: .whitespacesAndNewlines) else { return }
+        NSPasteboard.general.setString(newString, forType: .string)
+    }
 }
 
 /// The CGEventTap callback which intercepts right mouse events.
 func eventTapCallback(proxy: CGEventTapProxy, type: CGEventType, event: CGEvent, refcon: UnsafeMutableRawPointer?) -> Unmanaged<CGEvent>? {
 
-    // skip if modifiers are held
-    guard event.flags.isEmpty else {
+    // skip if modifiers (other than alt) are held
+    guard event.flags.isSubset(of: [.maskAlternate]) else {
         return Unmanaged.passUnretained(event)
     }
 
@@ -90,7 +100,7 @@ func eventTapCallback(proxy: CGEventTapProxy, type: CGEventType, event: CGEvent,
         case .Selection:
             // As the mouse moves, synthesize left-mouse dragged events.
             simulateMouseEvent(src: CGEventSource(event: event), proxy: proxy,
-                              type: .leftMouseDragged, at: event.location)
+                              type: .leftMouseDragged, at: event.location, with: event.flags)
         // time has elapsed, let's decide if we're selecting or clicking.
         case .TBD where event.timestamp - initialClickTime > dragTimeThreshold:
             // have we dragged the mouse like we're selecting?
@@ -98,15 +108,15 @@ func eventTapCallback(proxy: CGEventTapProxy, type: CGEventType, event: CGEvent,
                 mode = .Selection
                 // Begin custom selection by simulating a left-mouse down at the start location.
                 simulateMouseEvent(src: CGEventSource(event: event), proxy: proxy,
-                                  type: .leftMouseDown, at: initialClickLocation)
+                                  type: .leftMouseDown, at: initialClickLocation, with: event.flags)
                 // Also simulate the first drag event.
                 simulateMouseEvent(src: CGEventSource(event: event), proxy: proxy,
-                                  type: .leftMouseDragged, at: event.location)
+                                  type: .leftMouseDragged, at: event.location, with: event.flags)
             } else {
                 // Not dragging. Send held click.
                 mode = .Hold
                 simulateMouseEvent(src: CGEventSource(event: event), proxy: proxy,
-                                  type: .rightMouseDown, at: event.location)
+                                  type: .rightMouseDown, at: event.location, with: event.flags)
             }
         // If we aren't dragging yet.
         default: break
@@ -119,11 +129,9 @@ func eventTapCallback(proxy: CGEventTapProxy, type: CGEventType, event: CGEvent,
         case .Selection:
             // End the selection with a left-mouse up event.
             simulateMouseEvent(src: CGEventSource(event: event), proxy: proxy,
-                               type: .leftMouseUp, at: event.location)
-            // Now simulate Cmd+C to copy the selected text.
-            simulateCmdC()
-            // trim clipboard
-            trimClipboard()
+                               type: .leftMouseUp, at: event.location, with: event.flags)
+            // Now simulate Cmd+C and copy the selected text.
+            copySelection(appendToClipboard: event.flags.contains([.maskAlternate]))
             // Reset globals
             mode = .TBD
             return nil
@@ -137,7 +145,7 @@ func eventTapCallback(proxy: CGEventTapProxy, type: CGEventType, event: CGEvent,
             // No drag was detected; this is a normal right-click.
             // Send down
             simulateMouseEvent(src: CGEventSource(event: event), proxy: proxy,
-                               type: .rightMouseDown, at: event.location)
+                               type: .rightMouseDown, at: event.location, with: event.flags)
             // Send up
             return Unmanaged.passUnretained(event)
         }
@@ -145,13 +153,14 @@ func eventTapCallback(proxy: CGEventTapProxy, type: CGEventType, event: CGEvent,
         // Handle additional events like leftMouseDown or otherMouseDown etc here. We want right-mouse down behavior
         switch mode {
         case .Selection:
+            // We want a mouse button combo: right hold
+            mode = .Hold
             // End the selection with a left-mouse up event.
             simulateMouseEvent(src: CGEventSource(event: event), proxy: proxy,
-                               type: .leftMouseUp, at: event.location)
-            mode = .Hold
+                               type: .leftMouseUp, at: event.location, with: event.flags)
             // Send right-click down
             simulateMouseEvent(src: CGEventSource(event: event), proxy: proxy,
-                               type: .rightMouseDown, at: event.location)
+                               type: .rightMouseDown, at: event.location, with: event.flags)
         case .Hold:
             // Already sent right down. Just pass along.
             break
@@ -160,7 +169,7 @@ func eventTapCallback(proxy: CGEventTapProxy, type: CGEventType, event: CGEvent,
             mode = .Hold
             // Send right-click down
             simulateMouseEvent(src: CGEventSource(event: event), proxy: proxy,
-                               type: .rightMouseDown, at: event.location)
+                               type: .rightMouseDown, at: event.location, with: event.flags)
         }
         // Send whatever this is
         return Unmanaged.passUnretained(event)
